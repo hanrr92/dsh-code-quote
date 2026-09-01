@@ -1,0 +1,4 @@
+# Adds the code-quote host plugin and its browser composer entry to the active profile.
+- insert:
+    - id: dsh-code-quote
+      name: dsh-code-quote
