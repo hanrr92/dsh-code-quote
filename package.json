@@ -28,6 +28,14 @@
     "composer"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hanrr92/dsh-code-quote.git"
+  },
+  "homepage": "https://github.com/hanrr92/dsh-code-quote#readme",
+  "bugs": {
+    "url": "https://github.com/hanrr92/dsh-code-quote/issues"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
