@@ -32,11 +32,19 @@ token 形态契约（client 与 host 两半必须同形）：`⟦代码引用#<i
 ## 安装
 
 ```powershell
-# 本地目录安装（或用 tarball / git 地址）
-dsh plugin --profile web add D:\path\to\dsh-code-quote
+# ① npm 包名直装（发布后可用，推荐——免构建授权步骤）
+dsh plugin --profile web add dsh-code-quote
+
+# ② GitHub Release 预构建 tarball
+dsh plugin --profile web add https://github.com/hanrr92/dsh-code-quote/releases/download/v0.1.0/dsh-code-quote-0.1.0.tgz
+
+# ③ GitHub 源码 tarball（pinned）
+dsh plugin --profile web add https://codeload.github.com/hanrr92/dsh-code-quote/tar.gz/<sha>
 
 # 安装后需重启 profile：bundle 成员在启动时固定
 ```
+
+国内网络下 npm 安装走 npmmirror 镜像即可（发布后自动同步）；包本身无构建步骤，三种方式效果一致。
 
 `cordis.patch.yml` 会经 `dsh.bundle.patch` 在 reconcile 时自动把插件加入 profile 组合；无需构建步骤（源码即 ESM 直发）。安装后重启，浏览器端 client bundle 重新下发即可生效。
 

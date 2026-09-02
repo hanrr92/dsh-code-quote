@@ -28,6 +28,9 @@
     "composer"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/hanrr92/dsh-code-quote.git"
