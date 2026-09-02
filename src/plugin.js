@@ -24,7 +24,9 @@ const MAX_ENTRIES = 64
 const MAX_CODE_CHARS = 131072
 const MAX_BODY_BYTES = 192 * 1024
 
-const TOKEN_RE = /⟦代码引用#([a-z0-9]+)\|([^⟦\n]{0,300})⟧/g
+// 只认插件生成的 id 形态（'q' + base36 时间戳 + 随机尾，共 ≥8 位）：
+// 文档示例里的字面模板（如 ⟦代码引用#id|header⟧）不会被误扫成活引用。
+const TOKEN_RE = /⟦代码引用#(q[a-z0-9]{7,})\|([^⟦\n]{0,300})⟧/g
 
 export const name = 'dsh-code-quote'
 
@@ -244,13 +246,19 @@ export function apply(ctx) {
       }
     }
     if (found.length === 0) return decision
-    const appended = found.map((item) => deepFreeze({
+    // 多个 token 合并为一条上下文消息（#5）：省 per-token 消息开销；
+    // 单 token 保持原文案不变。
+    const sections = found.map((item) => contextText(item.id, item.header))
+    const text = found.length === 1
+      ? sections[0]
+      : '【代码引用快照 ×' + found.length + '】\n\n' + sections.join('\n\n---\n\n')
+    const appended = [deepFreeze({
       id: uuid(),
       role: 'user',
-      content: [{ type: 'text', text: contextText(item.id, item.header) }],
+      content: [{ type: 'text', text }],
       source: { kind: 'plugin', plugin: 'dsh-code-quote' },
-    }))
-    ctx.logger?.info?.(`[dsh-code-quote] expanding ${found.length} quote token(s) at turn ${payload.turn} step ${payload.step}`)
+    })]
+    ctx.logger?.info?.(`[dsh-code-quote] expanding ${found.length} quote token(s) into 1 context message at turn ${payload.turn} step ${payload.step}`)
     return { kind: 'enter', messages: messages.concat(appended) }
   })
 }
