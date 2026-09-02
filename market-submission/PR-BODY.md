@@ -12,9 +12,9 @@ Composer code-quote collapse for the DSH Web UI. Pasting a `path:lines` header f
 - [x] Real, working code — no build step required (source ships as ESM)
 - [x] Category: `ui` (composer/input-box behavior)
 - [x] `dsh-plugin` topic added to the repo
-- [x] Prebuilt tarball attached to a GitHub Release (`tarball:` field points at the pinned `v0.1.0` asset)
-- [ ] Repo age ≥ 1 day and ≥ 10 commits (verified before this PR was opened)
-- [ ] npm: not published; installs work from the Release tarball or source
+- [x] Prebuilt tarball attached to a GitHub Release (`tarball:` field points at the pinned `v0.2.0` asset)
+- [ ] Repo age ≥ 1 day and ≥ 10 commits (both verified by CI before this PR is merged)
+- [x] npm: `dsh-code-quote@0.1.0` published (0.2.0 with snapshot persistence ships on the Release tarball)
 
 ## Install
 
