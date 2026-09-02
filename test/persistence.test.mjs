@@ -104,13 +104,15 @@ assert.ok(appended(d3)[0].content[0].text.includes('快照已失效'), '未知 i
 // --- 配置端点（#3）：默认值 + 环境变量覆盖 ---
 const cfg1 = await get(box1.routes.get('/dsh-code-quote/config'))
 assert.equal(cfg1.statusCode, 200)
-assert.deepEqual(cfg1.payload, { minInserted: 30, minSingleLineChars: 40 })
+assert.deepEqual(cfg1.payload, { minInserted: 30, minSingleLineChars: 40, chipMode: false })
 process.env.DSH_CODE_QUOTE_MIN_INSERTED = '12'
 process.env.DSH_CODE_QUOTE_MIN_SINGLE_LINE_CHARS = '25'
+process.env.DSH_CODE_QUOTE_CHIP_MODE = '1'
 const cfg2 = await get(box1.routes.get('/dsh-code-quote/config'))
-assert.deepEqual(cfg2.payload, { minInserted: 12, minSingleLineChars: 25 })
+assert.deepEqual(cfg2.payload, { minInserted: 12, minSingleLineChars: 25, chipMode: true })
 delete process.env.DSH_CODE_QUOTE_MIN_INSERTED
 delete process.env.DSH_CODE_QUOTE_MIN_SINGLE_LINE_CHARS
+delete process.env.DSH_CODE_QUOTE_CHIP_MODE
 
 // --- 模板形 token（文档示例字面 id）不触发注入（TOKEN_RE 只认生成形态） ---
 const d4 = await runPreStep(box2.preStep, 'doc example ⟦代码引用#id|header⟧ only')

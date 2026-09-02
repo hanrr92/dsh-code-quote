@@ -198,12 +198,19 @@ function putQuote(payload) {
 const DEFAULT_MIN_INSERTED = 30
 const DEFAULT_MIN_SINGLE_LINE_CHARS = 40
 
+function envTruthy(value) {
+  return value === '1' || value === 'true' || value === 'on'
+}
+
 function configPayload() {
   const minInserted = Number.parseInt(process.env.DSH_CODE_QUOTE_MIN_INSERTED, 10)
   const minSingleLine = Number.parseInt(process.env.DSH_CODE_QUOTE_MIN_SINGLE_LINE_CHARS, 10)
   return {
     minInserted: Number.isFinite(minInserted) && minInserted >= 0 ? minInserted : DEFAULT_MIN_INSERTED,
     minSingleLineChars: Number.isFinite(minSingleLine) && minSingleLine >= 10 ? minSingleLine : DEFAULT_MIN_SINGLE_LINE_CHARS,
+    // 真 chip 模式（#2）：实验特性默认关——bail 的 span 区间替换语义未在全部
+    // DSH 版本验证，关闭时走已验证的 setDraft token 折叠。
+    chipMode: envTruthy(process.env.DSH_CODE_QUOTE_CHIP_MODE),
   }
 }
 

@@ -100,6 +100,8 @@ test/persistence.test.mjs 持久化自测（put / 重启存活 / 失效回退）
 
 调整识别阈值：默认内置（插入 ≥30 字符、单行代码 ≥40 字符），可用环境变量 `DSH_CODE_QUOTE_MIN_INSERTED` / `DSH_CODE_QUOTE_MIN_SINGLE_LINE_CHARS` 覆盖；客户端启动时经 `GET /dsh-code-quote/config` 拉取一次，拉取失败沿用内置默认。token 形态若变化，需同步修改 `src/plugin.js` 的 `TOKEN_RE` 与 `contextText`。
 
+真 chip 模式（实验，默认关）：设环境变量 `DSH_CODE_QUOTE_CHIP_MODE=1` 后，折叠产物在输入框中成为可退格删除的真引用 chip，发送时仍序列化为紧凑 token，host 快照注入链路不变。该模式依赖 DSH 引用机制的 span 区间替换语义，若发现粘贴后原始代码未被替换，请关闭该开关并提 Issue 反馈。
+
 持久化自测：`node test/persistence.test.mjs`。
 
 ## License
