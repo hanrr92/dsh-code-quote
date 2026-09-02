@@ -48,6 +48,16 @@ dsh plugin --profile web add https://codeload.github.com/hanrr92/dsh-code-quote/
 
 `cordis.patch.yml` 会经 `dsh.bundle.patch` 在 reconcile 时自动把插件加入 profile 组合；无需构建步骤（源码即 ESM 直发）。安装后重启，浏览器端 client bundle 重新下发即可生效。
 
+## 卸载
+
+卸载方法见 [UNINSTALL.md](./UNINSTALL.md)。最常用一行：
+
+```powershell
+dsh plugin --profile web remove dsh-code-quote
+```
+
+（推荐）之后重启 profile 即从运行组合移除。
+
 ## 使用与识别规则
 
 把下面这种格式粘贴进输入框（编辑器选中复制即可）：
