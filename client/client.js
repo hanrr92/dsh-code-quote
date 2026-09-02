@@ -28,6 +28,19 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     return data
   }
 
+  /** 折叠失败的轻提示：右下角浮层，4 秒自动消失，不阻塞输入（#4）。 */
+  function showToast(message) {
+    if (typeof document === 'undefined' || !document.body) return
+    var toast = document.createElement('div')
+    toast.textContent = message
+    toast.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;max-width:360px;'
+      + 'padding:8px 12px;border:1px solid rgba(255,80,80,0.35);border-radius:8px;'
+      + 'background:#2a1b1b;color:#f2d5d5;font-size:12px;line-height:1.5;'
+      + 'box-shadow:0 6px 20px rgba(0,0,0,0.45);font-family:inherit;pointer-events:none;'
+    document.body.appendChild(toast)
+    setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast) }, 4000)
+  }
+
   /** 前后缀公共扫描：返回 next 相对 prev 的纯插入区间（与输入机 diffEdit 同法）。 */
   function diffInsert(prev, next) {
     if (next.length <= prev.length) return null
@@ -112,7 +125,10 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
         var token = '⟦代码引用#' + id + '|' + quote.header + '⟧'
         box.lastToken = token
         actions.setDraft(next.slice(0, change.start) + token + next.slice(change.end))
-      }, function () {})
+      }, function (error) {
+        // 快照保存失败不再静默：明示用户本次折叠未发生（#4）。
+        showToast('代码引用折叠失败：' + (error && error.message ? error.message : '快照保存失败'))
+      })
     })
 
     return null
