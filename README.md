@@ -10,7 +10,7 @@
 - **气泡**：发送后用户消息保持紧凑 token；
 - **模型**：`agent/pre-step` 在消息进入模型前，把粘贴时落定的完整代码快照作为一条独立的上下文消息追加进批次（UI 中渲染为可展开的「上下文注入」行，后续轮次持续可见）。
 
-数据是**快照**口径：折叠那一刻的代码内容被留存，之后文件怎么改动都不影响这条引用；DSH 进程重启后快照丢失，发送时会注入「快照已失效」提示而不是静默失败。
+数据是**快照**口径：折叠那一刻的代码内容被留存，之后文件怎么改动都不影响这条引用；快照持久化到 `<DSH_HOME>/storages/dsh-code-quote/snapshots.json`，**进程重启后仍可用**——「快照已失效」提示仅作为文件损坏/被删等极端情况的回退，不静默失败。
 
 ## 工作原理
 
@@ -32,11 +32,11 @@ token 形态契约（client 与 host 两半必须同形）：`⟦代码引用#<i
 ## 安装
 
 ```powershell
-# ① npm 包名直装（发布后可用，推荐——免构建授权步骤）
+# ① npm 包名直装（推荐——免构建授权步骤）
 dsh plugin --profile web add dsh-code-quote
 
 # ② GitHub Release 预构建 tarball
-dsh plugin --profile web add https://github.com/hanrr92/dsh-code-quote/releases/download/v0.1.0/dsh-code-quote-0.1.0.tgz
+dsh plugin --profile web add https://github.com/hanrr92/dsh-code-quote/releases/download/v0.2.0/dsh-code-quote-0.2.0.tgz
 
 # ③ GitHub 源码 tarball（pinned）
 dsh plugin --profile web add https://codeload.github.com/hanrr92/dsh-code-quote/tar.gz/<sha>
@@ -44,7 +44,7 @@ dsh plugin --profile web add https://codeload.github.com/hanrr92/dsh-code-quote/
 # 安装后需重启 profile：bundle 成员在启动时固定
 ```
 
-国内网络下 npm 安装走 npmmirror 镜像即可（发布后自动同步）；包本身无构建步骤，三种方式效果一致。
+国内网络下 npm 安装走 npmmirror 镜像即可；包本身无构建步骤，三种方式效果一致。
 
 `cordis.patch.yml` 会经 `dsh.bundle.patch` 在 reconcile 时自动把插件加入 profile 组合；无需构建步骤（源码即 ESM 直发）。安装后重启，浏览器端 client bundle 重新下发即可生效。
 
@@ -84,18 +84,21 @@ dsh-web-launcher/package.json:13-15
 
 - 识别阈值偏保守：无 header 的纯代码粘贴不会折叠（后续版本可加）；
 - 折叠后光标可能跳到输入框末尾；
-- 快照存于 DSH 进程内存（上限 64 块 / 单块 128KB，LRU 淘汰），进程重启即失效（有失效回退提示，不阻塞发送）；
+- 快照持久化于 `<DSH_HOME>/storages/dsh-code-quote/snapshots.json`（上限 64 块 / 单块 128KB，LRU 淘汰），进程重启后自动载回；存储不可用时退化为内存 LRU，文件损坏/被删则回退「快照已失效」提示，不阻塞发送；
 - 与会话内动态版插件（如 `quote-1`）**二选一**：两者都监听 `agent/pre-step`，同时启用会重复注入。
 
 ## 开发
 
 ```
-src/plugin.js    Host 半：/dsh-code-quote/put 路由（same-origin 校验）+ agent/pre-step 注入
+src/plugin.js    Host 半：/dsh-code-quote/put 路由（same-origin 校验）+ agent/pre-step 注入 + 快照原子持久化（tmp+rename）
 client/client.js 浏览器半：dock 条目、粘贴识别与折叠、fetch 存快照
 cordis.patch.yml bundle 成员声明（reconcile 时插入 profile 组合）
+test/persistence.test.mjs 持久化自测（put / 重启存活 / 失效回退）
 ```
 
 调整识别阈值：改 `client/client.js` 的 `MIN_INSERTED` 与 `parseQuote`；token 形态若变化，需同步修改 `src/plugin.js` 的 `TOKEN_RE` 与 `contextText`。
+
+持久化自测：`node test/persistence.test.mjs`。
 
 ## License
 

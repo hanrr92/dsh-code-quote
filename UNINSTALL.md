@@ -43,6 +43,16 @@ dsh web    # 或按你平时的启动方式重启
 dsh plugin --profile web add dsh-code-quote
 ```
 
+## 清理快照数据（可选）
+
+卸载不会删除已落盘的快照数据。如需彻底清理，删除目录：
+
+```powershell
+Remove-Item -Recurse -Force "$env:DSH_HOME\storages\dsh-code-quote"
+```
+
+（若设置了 `DSH_CODE_QUOTE_DATA_DIR` 覆盖路径，则删除该目录即可。）
+
 ## 通用验证
 
 卸载并重启后，确认组合里已无该插件：
