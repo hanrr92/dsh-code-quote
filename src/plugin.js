@@ -193,6 +193,20 @@ function putQuote(payload) {
   return { ok: true }
 }
 
+/* ---------- 折叠阈值配置（#3）：默认内置，环境变量可覆盖，经 GET /config 下发给客户端 ---------- */
+
+const DEFAULT_MIN_INSERTED = 30
+const DEFAULT_MIN_SINGLE_LINE_CHARS = 40
+
+function configPayload() {
+  const minInserted = Number.parseInt(process.env.DSH_CODE_QUOTE_MIN_INSERTED, 10)
+  const minSingleLine = Number.parseInt(process.env.DSH_CODE_QUOTE_MIN_SINGLE_LINE_CHARS, 10)
+  return {
+    minInserted: Number.isFinite(minInserted) && minInserted >= 0 ? minInserted : DEFAULT_MIN_INSERTED,
+    minSingleLineChars: Number.isFinite(minSingleLine) && minSingleLine >= 10 ? minSingleLine : DEFAULT_MIN_SINGLE_LINE_CHARS,
+  }
+}
+
 export function apply(ctx) {
   loggerRef = ctx.logger
   loadSnapshots(ctx.logger)
@@ -225,10 +239,21 @@ export function apply(ctx) {
           }
         },
       })
-      return dispose
-    }, 'dsh-code-quote: put route')
+      const disposeConfig = host.webServer.register({
+        kind: 'exact',
+        path: '/dsh-code-quote/config',
+        handler: async (request, response) => {
+          if (request.method !== 'GET') {
+            response.writeHead(405, { allow: 'GET' })
+            response.end()
+            return
+          }
+          sendJson(response, 200, configPayload())
+        },
+      })
+      return () => { dispose(); disposeConfig() }
+    }, 'dsh-code-quote: put + config routes')
   })
-
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     if (decision === undefined || decision === null || decision.kind !== 'enter') return decision

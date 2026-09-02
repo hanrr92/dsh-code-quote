@@ -5,6 +5,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
 
   // 与 host 半 src/plugin.js 的 TOKEN_RE 保持同形：⟦代码引用#id|header⟧
   var MIN_INSERTED = 30
+  var MIN_SINGLE_LINE_CHARS = 40
 
   function makeId() {
     return 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
@@ -67,8 +68,19 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       }
     }
     if (nonBlank === 0) return null
-    if (nonBlank < 2 && totalChars < 40) return null
+    if (nonBlank < 2 && totalChars < MIN_SINGLE_LINE_CHARS) return null
     return { header: headerLine, code: codeLines.join('\n') }
+  }
+
+  // 启动时拉取一次阈值配置（host 端环境变量可覆盖），失败沿用内置默认（#3）。
+  if (typeof fetch === 'function') {
+    fetch('/dsh-code-quote/config').then(function (response) {
+      return response.ok ? response.json() : null
+    }).then(function (data) {
+      if (data === null || typeof data !== 'object') return
+      if (typeof data.minInserted === 'number' && data.minInserted >= 0) MIN_INSERTED = data.minInserted
+      if (typeof data.minSingleLineChars === 'number' && data.minSingleLineChars >= 10) MIN_SINGLE_LINE_CHARS = data.minSingleLineChars
+    }, function () {})
   }
 
   /**

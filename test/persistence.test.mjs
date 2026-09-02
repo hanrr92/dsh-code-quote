@@ -51,6 +51,18 @@ function post(handler, body) {
   })
 }
 
+function get(handler) {
+  return new Promise((resolve, reject) => {
+    const request = { method: 'GET', headers: { origin: 'http://x', host: 'x' }, on() {}, destroy() {} }
+    const response = {
+      statusCode: 0, payload: null,
+      writeHead(code) { this.statusCode = code },
+      end(data) { this.payload = data ? JSON.parse(data) : null; resolve(this) },
+    }
+    Promise.resolve(handler(request, response)).catch(reject)
+  })
+}
+
 async function runPreStep(preStep, text) {
   return preStep({ turn: 1, step: 1 }, async () => ({
     kind: 'enter',
@@ -89,6 +101,17 @@ const d3 = await runPreStep(box2.preStep, '⟦代码引用#qnopeaaaa|x:1⟧')
 assert.equal(appended(d3).length, 1)
 assert.ok(appended(d3)[0].content[0].text.includes('快照已失效'), '未知 id 应走失效回退')
 
+// --- 配置端点（#3）：默认值 + 环境变量覆盖 ---
+const cfg1 = await get(box1.routes.get('/dsh-code-quote/config'))
+assert.equal(cfg1.statusCode, 200)
+assert.deepEqual(cfg1.payload, { minInserted: 30, minSingleLineChars: 40 })
+process.env.DSH_CODE_QUOTE_MIN_INSERTED = '12'
+process.env.DSH_CODE_QUOTE_MIN_SINGLE_LINE_CHARS = '25'
+const cfg2 = await get(box1.routes.get('/dsh-code-quote/config'))
+assert.deepEqual(cfg2.payload, { minInserted: 12, minSingleLineChars: 25 })
+delete process.env.DSH_CODE_QUOTE_MIN_INSERTED
+delete process.env.DSH_CODE_QUOTE_MIN_SINGLE_LINE_CHARS
+
 // --- 模板形 token（文档示例字面 id）不触发注入（TOKEN_RE 只认生成形态） ---
 const d4 = await runPreStep(box2.preStep, 'doc example ⟦代码引用#id|header⟧ only')
 assert.equal(appended(d4).length, 0, '模板 token 不应触发注入')
@@ -103,4 +126,4 @@ assert.ok(appended(d5)[0].content[0].text.includes('const d = 4'), '合并消息
 assert.ok(appended(d5)[0].content[0].text.includes('×2'), '合并消息应标注数量')
 
 rmSync(dataDir, { recursive: true, force: true })
-console.log('persistence test passed (put / restart-survival / missing-fallback / template-ignore / multi-token-merge)')
+console.log('persistence test passed (put / restart-survival / missing-fallback / template-ignore / multi-token-merge / config-endpoint)')

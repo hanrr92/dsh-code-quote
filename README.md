@@ -97,7 +97,7 @@ cordis.patch.yml bundle 成员声明（reconcile 时插入 profile 组合）
 test/persistence.test.mjs 持久化自测（put / 重启存活 / 失效回退）
 ```
 
-调整识别阈值：改 `client/client.js` 的 `MIN_INSERTED` 与 `parseQuote`；token 形态若变化，需同步修改 `src/plugin.js` 的 `TOKEN_RE` 与 `contextText`。
+调整识别阈值：默认内置（插入 ≥30 字符、单行代码 ≥40 字符），可用环境变量 `DSH_CODE_QUOTE_MIN_INSERTED` / `DSH_CODE_QUOTE_MIN_SINGLE_LINE_CHARS` 覆盖；客户端启动时经 `GET /dsh-code-quote/config` 拉取一次，拉取失败沿用内置默认。token 形态若变化，需同步修改 `src/plugin.js` 的 `TOKEN_RE` 与 `contextText`。
 
 持久化自测：`node test/persistence.test.mjs`。
 

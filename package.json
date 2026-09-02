@@ -1,6 +1,6 @@
 {
   "name": "dsh-code-quote",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "粘贴「路径:行号 + 代码」到 DSH 输入框时自动折叠为紧凑引用，发送时把代码快照以独立上下文消息内联给模型。",
   "type": "module",
   "main": "./src/plugin.js",
