@@ -3,7 +3,8 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
   const exports = module.exports
   const React = require('react')
 
-  // 与 host 半 src/plugin.js 的 TOKEN_RE 保持同形：⟦代码引用#id|header⟧
+  // 与 host 半 src/plugin.js 的 TOKEN_NEW_RE/TOKEN_OLD_RE 保持同形：
+  // 新 @⟦代码引用#id⟧header / 旧 ⟦代码引用#id|header⟧（兼容扫描，不新产）
   var MIN_INSERTED = 30
   var MIN_SINGLE_LINE_CHARS = 40
 
@@ -41,11 +42,12 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast) }, 4000)
   }
 
-  /* ---------- 真 chip 模式（#2，实验特性，host 配置 chipMode 才启用） ---------- */
+  /* ---------- 真 chip 模式（#2，0.3.2 起默认开，host 可配 0 关闭） ---------- */
 
   var SOURCE_NAME = 'code-quote'
   var ctxSessions = null
-  var chipMode = false
+  // 与 host 默认一致（0.3.2 起默认开）；/config 拉取后会覆盖。
+  var chipMode = true
   var REGISTRY_KEY = 'dsh-code-quote/registry'
   var registry = {}
   try {
@@ -61,9 +63,11 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     try { sessionStorage.setItem(REGISTRY_KEY, JSON.stringify(registry)) } catch (e) {}
   }
 
-  function previewHeader(header) {
-    var flat = String(header).replace(/\s+/g, ' ').trim()
-    return flat.length > 20 ? flat.slice(0, 20) + '…' : flat
+  /** 芯片 label：剥 markdown 围栏后取末段路径（= 文件名:行号），与内核文件引用芯片同款。 */
+  function chipLabel(header) {
+    var clean = String(header).replace(/^`+|`+$/g, '')
+    var parts = clean.split(/[\\/]/).filter(Boolean)
+    return parts.length > 0 ? parts[parts.length - 1] : clean
   }
 
   /** 尝试在粘贴区间 mint 真 occurrence chip（bail 区间替换）；任何失败返回 false 走 token 回退。 */
@@ -73,7 +77,13 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       var actx = ctxSessions.scope(props.sessionId)
       if (!actx || typeof actx.bail !== 'function') return false
       var applied = actx.bail(actx, 'slash/input-insert-reference', {
-        reference: { source: SOURCE_NAME, ref: id, label: '❝ ' + previewHeader(header), clipboardText: header },
+        reference: {
+          source: SOURCE_NAME,
+          ref: id,
+          label: chipLabel(header),
+          appearance: 'file',
+          clipboardText: header,
+        },
         span: { start: change.start, end: change.end, draftRev: rev },
       })
       return applied === true
@@ -100,6 +110,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
   /**
    * 识别「header 行 + 代码体」粘贴：首行形如 路径:行号 或 路径:起-止，
    * 其后至少 1 行代码（单行代码需 ≥40 字符）。不含换行或已含 token 字符时拒绝。
+   * header 先剥 markdown 围栏（```）残留，避免 IDE/网页复制带入的围栏污染 header。
    */
   function parseQuote(text) {
     if (text.indexOf('\n') < 0) return null
@@ -108,7 +119,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     var head = 0
     while (head < lines.length && lines[head].trim() === '') head++
     if (head >= lines.length) return null
-    var headerLine = lines[head].trim()
+    var headerLine = lines[head].trim().replace(/^`+|`+$/g, '')
     if (!/^(\S.*?):(\d+)(?:-(\d+))?$/.test(headerLine)) return null
     var end = lines.length
     while (end > head + 1 && lines[end - 1].trim() === '') end--
@@ -166,13 +177,19 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
         // RPC 往返期间草稿又变了：放弃折叠，不打扰用户输入。
         if (box.latest !== next) return
         rememberId(id, quote.header)
-        // chip 模式（#2，默认关）：先试真引用 chip（bail 区间替换）；失败/未启用
-        // 回退到已验证的 setDraft token 折叠。两路用同一 id，重复 token 会被 host 去重。
+        // chip 模式（#2，0.3.2 起默认开）：先试真引用 chip（bail 区间替换，
+        // 与内置 @ 引用同一条 insert-ref 机制）；失败/关闭回退到 setDraft token
+        // 折叠。两路用同一 id，重复 token 会被 host 去重。
+        // token 以 @ 开头：发送后用户气泡被内核渲染成文件图标芯片。
+        // 0.3.3：token header 必须是完整路径（含 /）——内核气泡芯片的显示文案
+        // 取「最后一个 / 段」（MessageItem projectUserText displayLabel），
+        // 机器码必须躲在非显示段才不可见；0.3.1/0.3.2 的纯文件名 header 曾使
+        // 机器码整段漏出到气泡芯片。输入框长度由 chip 模式解决，不靠缩短 token。
         var rev = box.latestState !== null && box.latestState !== undefined && typeof box.latestState.draftRev === 'number'
           ? box.latestState.draftRev
           : 0
         if (chipMode && mintChip(props, change, id, quote.header, rev)) return
-        var token = '⟦代码引用#' + id + '|' + quote.header + '⟧'
+        var token = '@⟦代码引用#' + id + '⟧' + quote.header
         box.lastToken = token
         actions.setDraft(next.slice(0, change.start) + token + next.slice(change.end))
       }, function (error) {
@@ -189,7 +206,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     ctxSessions = ctx.sessions
     if (ctx.inputTriggers && typeof ctx.inputTriggers.registerSource === 'function') {
       // chip 的发送时序列化（#2）：永不忘 throw——registry 丢失（如换标签页）时
-      // 退化为无 header 的 token，host 端快照仍能补全 header 并注入。
+      // 退化为无 header 的 token，host 端快照仍能补全完整 header 并注入。
       ctx.effect(() => ctx.inputTriggers.registerSource({
         trigger: '@',
         name: SOURCE_NAME,
@@ -198,7 +215,9 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
         onPick: () => undefined,
         codec: {
           clipboardText(ref) { return registry[ref] || '' },
-          serialize(ref) { return '⟦代码引用#' + ref + '|' + (registry[ref] || '') + '⟧' },
+          // 序列化必须保留完整路径（含 /）：气泡芯片按「最后一个 / 段」显示，
+          // 机器码靠前置路径段藏身（0.3.3，见折叠处注释）。
+          serialize(ref) { return '@⟦代码引用#' + ref + '⟧' + (registry[ref] || '') },
         },
       }), 'code-quote: trigger source')
     }
