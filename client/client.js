@@ -111,9 +111,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
   /**
    * 识别「header 行 + 代码体」粘贴：首行形如 路径:行号 或 路径:起-止，
    * 其后至少 1 行代码（单行代码需 ≥40 字符）。不含换行或已含 token 字符时拒绝。
-   * header 先剥 markdown 围栏（```）残留；再剥内核粘贴升级可能加上的 @ 前缀
-   * （内核会把粘贴文本里的路径 token 异步升级为 @path 芯片，我们拿到的差异
-   * 文本首行可能已带 @），避免 header 变成 "@路径"。
+   * header 先剥 markdown 围栏（```）残留；再剥内核粘贴升级可能加上的 @ 前缀。
    */
   function parseQuote(text) {
     if (text.indexOf('\n') < 0) return null
@@ -149,6 +147,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       if (typeof data.minInserted === 'number' && data.minInserted >= 0) MIN_INSERTED = data.minInserted
       if (typeof data.minSingleLineChars === 'number' && data.minSingleLineChars >= 10) MIN_SINGLE_LINE_CHARS = data.minSingleLineChars
       if (typeof data.chipMode === 'boolean') chipMode = data.chipMode
+      console.log('[code-quote] config loaded: minInserted=' + MIN_INSERTED + ' minSingleLineChars=' + MIN_SINGLE_LINE_CHARS + ' chipMode=' + chipMode)
     }, function () {})
   }
 
@@ -160,12 +159,17 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     var box = React.useState(function () {
       return {
         prev: null, lastToken: null, latest: null, latestState: null,
-        foldTimer: null, deferCount: 0, retries: 0, folding: false,
+        foldTimer: null, deferCount: 0, retries: 0, folding: false, mountLogged: false,
       }
     })[0]
     var input = props.useInput(function (state) { return state })
     box.latestState = input === undefined || input === null ? null : input
     box.latest = input === undefined || input === null ? null : input.draft
+
+    if (!box.mountLogged) {
+      box.mountLogged = true
+      console.log('[code-quote] dock mounted, sessionId=' + props.sessionId + ', hasActions=' + (props.inputActions !== undefined && props.inputActions !== null))
+    }
 
     function pasteLive() {
       var state = box.latestState
@@ -173,26 +177,28 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     }
 
     /**
-     * 一次折叠尝试（0.3.5/0.3.6 语义）：
-     *  - 内核粘贴升级窗口（state.paste 存活）：有界等待——最多 3×250ms，超时后
-     *    照常折叠（我们自己的 insert-ref 事务会终结 paste attempt，之后的升级
-     *    不会再破坏芯片）。
-     *  - RPC 返回时草稿又变了：窗口内自动从冻结 base 重算重试（≤3 次），窗口外
-     *    跳过并轻提示。base 只在折叠落定/放弃时推进。
-     *  - 每次折叠都基于「当时最新草稿」重算 diff 与 rev，不复用旧快照。
-     *  - 0.3.6：base 判空必须在 diffInsert 之前（首次挂载 prev 为 null），
-     *    且 attemptFold 整体 try/catch——任何异常都不允许打崩 dock 槽位
-     *    （0.3.4/0.3.5 因判空后置导致挂载即崩溃、折叠彻底失效）。
+     * 一次折叠尝试（0.3.7 诊断版）：所有出口都打 console.log（默认可见——
+     * 0.3.5/0.3.6 用 console.debug 被 F12 默认级别隐藏，用户看不到日志无法定位）。
      */
     function attemptFold() {
-      if (box.folding) return
+      if (box.folding) {
+        console.log('[code-quote] skip: fold already in flight')
+        return
+      }
       var actions = props.inputActions
       var next = box.latest
       var state = box.latestState
-      if (typeof actions !== 'object' || actions === null || next === null) return
+      if (typeof actions !== 'object' || actions === null) {
+        console.error('[code-quote] skip: inputActions missing on dock props')
+        return
+      }
+      if (next === null) {
+        console.log('[code-quote] skip: no draft state yet')
+        return
+      }
       if (pasteLive() && box.deferCount < 3) {
         box.deferCount++
-        console.debug('[code-quote] paste upgrade window live, deferring fold (' + box.deferCount + '/3)')
+        console.log('[code-quote] defer ' + box.deferCount + '/3: kernel paste upgrade window live')
         if (box.foldTimer === null) {
           box.foldTimer = setTimeout(function () {
             box.foldTimer = null
@@ -204,56 +210,58 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       var inWindow = box.deferCount > 0
       box.deferCount = 0
       var prev = box.prev
-      if (prev === null || next === prev) {
+      if (prev === null) {
+        console.log('[code-quote] mount: base set, no fold')
         box.folding = false
         box.prev = next
+        return
+      }
+      if (next === prev) {
+        console.log('[code-quote] skip: draft unchanged')
+        box.folding = false
         return
       }
       box.folding = true
       var change = diffInsert(prev, next)
       var rev = state !== null && state !== undefined && typeof state.draftRev === 'number' ? state.draftRev : 0
       if (change === null || change.text.length < MIN_INSERTED) {
+        console.log('[code-quote] skip: no pure insertion or below threshold (' + (change === null ? 'diff=null' : change.text.length + ' chars') + ')')
         box.folding = false
         box.prev = next
         return
       }
-      // 折叠的 undo（token 被机器还原成原始粘贴）：放行，不重新折叠。
       if (box.lastToken !== null && prev.indexOf(box.lastToken) >= 0 && next.indexOf(box.lastToken) < 0) {
+        console.log('[code-quote] skip: user undid the fold')
         box.folding = false
         box.prev = next
         return
       }
       var quote = parseQuote(change.text)
       if (quote === null) {
+        console.log('[code-quote] skip: paste does not match quote shape (header+code)')
         box.folding = false
         box.prev = next
         return
       }
       var id = makeId()
+      console.log('[code-quote] quote matched: ' + quote.header + ' (' + quote.code.length + ' chars), id=' + id)
       putQuote({ id: id, header: quote.header, code: quote.code }).then(function () {
         if (box.latest !== next) {
-          // RPC 期间草稿又变了：窗口内自动重试（base 未推进，下一次 publish
-          // 会基于最新草稿重算）；窗口外放弃并提示。
           box.folding = false
           if (inWindow && box.retries < 3) {
             box.retries++
-            console.debug('[code-quote] draft changed during RPC, will re-fold from frozen base (' + box.retries + '/3)')
+            console.log('[code-quote] retry ' + box.retries + '/3: draft changed during RPC, re-folding from frozen base')
             return
           }
           box.retries = 0
           box.prev = next
           showToast('代码引用折叠已跳过：粘贴后输入仍在变化，请重新粘贴该段')
+          console.log('[code-quote] skip: draft changed during RPC')
           return
         }
         rememberId(id, quote.header)
-        // chip 模式（#2，0.3.2 起默认开）：先试真引用 chip（bail 区间替换，
-        // 与内置 @ 引用同一条 insert-ref 机制）；失败/关闭回退到 setDraft token
-        // 折叠。两路用同一 id，重复 token 会被 host 去重。
-        // token 以 @ 开头：发送后用户气泡被内核渲染成文件图标芯片。
-        // 0.3.3：token header 必须是完整路径（含 /）——内核气泡芯片的显示文案
-        // 取「最后一个 / 段」，机器码必须躲在非显示段才不可见。
         if (chipMode && mintChip(props, change, id, quote.header, rev)) {
-          console.debug('[code-quote] folded via chip ' + id)
+          console.log('[code-quote] folded via chip ' + id)
           box.folding = false
           box.retries = 0
           box.prev = next
@@ -262,14 +270,14 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
         var token = '@⟦代码引用#' + id + '⟧' + quote.header
         box.lastToken = token
         actions.setDraft(next.slice(0, change.start) + token + next.slice(change.end))
-        console.debug('[code-quote] folded via token ' + id)
+        console.log('[code-quote] folded via token ' + id + (chipMode ? ' (chip mint failed, token fallback)' : ' (chip mode off)'))
         box.folding = false
         box.retries = 0
         box.prev = next
       }, function (error) {
         box.folding = false
         box.prev = next
-        // 快照保存失败不再静默：明示用户本次折叠未发生（#4）。
+        console.error('[code-quote] fold failed: ' + (error && error.message ? error.message : String(error)))
         showToast('代码引用折叠失败：' + (error && error.message ? error.message : '快照保存失败'))
       })
     }
