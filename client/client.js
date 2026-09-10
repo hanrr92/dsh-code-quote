@@ -7,6 +7,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
   // 新 @⟦代码引用#id⟧header / 旧 ⟦代码引用#id|header⟧（兼容扫描，不新产）
   var MIN_INSERTED = 30
   var MIN_SINGLE_LINE_CHARS = 40
+  var SETTLE_MS = 400
 
   function makeId() {
     return 'q' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
@@ -176,56 +177,70 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       return state !== null && state !== undefined && state.paste !== undefined
     }
 
+    function scheduleSettle(delay) {
+      if (box.foldTimer !== null) clearTimeout(box.foldTimer)
+      box.foldTimer = setTimeout(function () {
+        box.foldTimer = null
+        settleFold()
+      }, delay === undefined ? SETTLE_MS : delay)
+    }
+
     /**
-     * 一次折叠尝试（0.3.7 诊断版）：所有出口都打 console.log（默认可见——
-     * 0.3.5/0.3.6 用 console.debug 被 F12 默认级别隐藏，用户看不到日志无法定位）。
+     * 0.3.8 语义：草稿一变就冻结 base（box.prev 不推进）并重置防抖定时器；
+     * 草稿稳定 SETTLE_MS 后一次性 diff 整段。实测内核把粘贴分块写入草稿
+     * （0.3.7 日志：只有 null/1chars 小差异 + unchanged 刷屏），逐次 diff 永远
+     * 看不到整段插入——settle 后统一 diff 是唯一可靠口径，分块粘贴、内核
+     * 粘贴升级中途改写均被覆盖。
      */
     function attemptFold() {
+      if (box.folding) return
+      var actions = props.inputActions
+      var next = box.latest
+      if (typeof actions !== 'object' || actions === null) {
+        console.error('[code-quote] skip: inputActions missing on dock props')
+        return
+      }
+      if (next === null) return
+      var prev = box.prev
+      if (prev === null) {
+        box.prev = next
+        console.log('[code-quote] mount: base set, no fold')
+        return
+      }
+      if (next === prev) return
+      scheduleSettle()
+    }
+
+    function settleFold() {
       if (box.folding) {
-        console.log('[code-quote] skip: fold already in flight')
+        scheduleSettle(200)
         return
       }
       var actions = props.inputActions
       var next = box.latest
       var state = box.latestState
-      if (typeof actions !== 'object' || actions === null) {
-        console.error('[code-quote] skip: inputActions missing on dock props')
-        return
-      }
-      if (next === null) {
-        console.log('[code-quote] skip: no draft state yet')
-        return
-      }
+      if (typeof actions !== 'object' || actions === null || next === null) return
+      var prev = box.prev
+      if (next === prev) return
+      // 内核粘贴升级窗口仍存活：再等等（有界），它落地后草稿还会变，反正会重触发。
       if (pasteLive() && box.deferCount < 3) {
         box.deferCount++
         console.log('[code-quote] defer ' + box.deferCount + '/3: kernel paste upgrade window live')
-        if (box.foldTimer === null) {
-          box.foldTimer = setTimeout(function () {
-            box.foldTimer = null
-            attemptFold()
-          }, 250)
-        }
+        scheduleSettle(250)
         return
       }
-      var inWindow = box.deferCount > 0
       box.deferCount = 0
-      var prev = box.prev
-      if (prev === null) {
-        console.log('[code-quote] mount: base set, no fold')
+      box.folding = true
+      var change = diffInsert(prev, next)
+      var rev = state !== null && state !== undefined && typeof state.draftRev === 'number' ? state.draftRev : 0
+      if (change === null) {
+        console.log('[code-quote] skip: draft shrank or was rewritten, rebase')
         box.folding = false
         box.prev = next
         return
       }
-      if (next === prev) {
-        console.log('[code-quote] skip: draft unchanged')
-        box.folding = false
-        return
-      }
-      box.folding = true
-      var change = diffInsert(prev, next)
-      var rev = state !== null && state !== undefined && typeof state.draftRev === 'number' ? state.draftRev : 0
-      if (change === null || change.text.length < MIN_INSERTED) {
-        console.log('[code-quote] skip: no pure insertion or below threshold (' + (change === null ? 'diff=null' : change.text.length + ' chars') + ')')
+      if (change.text.length < MIN_INSERTED) {
+        console.log('[code-quote] skip: insertion below threshold (' + change.text.length + ' chars)')
         box.folding = false
         box.prev = next
         return
@@ -238,7 +253,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       }
       var quote = parseQuote(change.text)
       if (quote === null) {
-        console.log('[code-quote] skip: paste does not match quote shape (header+code)')
+        console.log('[code-quote] skip: does not match quote shape (header+code)')
         box.folding = false
         box.prev = next
         return
@@ -247,16 +262,18 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       console.log('[code-quote] quote matched: ' + quote.header + ' (' + quote.code.length + ' chars), id=' + id)
       putQuote({ id: id, header: quote.header, code: quote.code }).then(function () {
         if (box.latest !== next) {
+          // RPC 期间草稿又变了：base 仍冻结在粘贴前，回到同一 base 重算重试（有界）。
           box.folding = false
-          if (inWindow && box.retries < 3) {
+          if (box.retries < 3) {
             box.retries++
-            console.log('[code-quote] retry ' + box.retries + '/3: draft changed during RPC, re-folding from frozen base')
+            console.log('[code-quote] retry ' + box.retries + '/3: draft changed during RPC, re-diff from frozen base')
+            scheduleSettle(250)
             return
           }
           box.retries = 0
-          box.prev = next
+          box.prev = box.latest
           showToast('代码引用折叠已跳过：粘贴后输入仍在变化，请重新粘贴该段')
-          console.log('[code-quote] skip: draft changed during RPC')
+          console.log('[code-quote] give up: draft kept changing during RPC')
           return
         }
         rememberId(id, quote.header)
