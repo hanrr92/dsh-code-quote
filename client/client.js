@@ -111,8 +111,8 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
    * 识别「header 行 + 代码体」粘贴：首行形如 路径:行号 或 路径:起-止，
    * 其后至少 1 行代码（单行代码需 ≥40 字符）。不含换行或已含 token 字符时拒绝。
    * header 先剥 markdown 围栏（```）残留；再剥内核粘贴升级可能加上的 @ 前缀
-   * （0.3.4：内核会把粘贴文本里的路径 token 异步升级为 @path 芯片，我们拿到
-   * 的差异文本首行可能已带 @），避免 header 变成 "@路径"。
+   * （内核会把粘贴文本里的路径 token 异步升级为 @path 芯片，我们拿到的差异
+   * 文本首行可能已带 @），避免 header 变成 "@路径"。
    */
   function parseQuote(text) {
     if (text.indexOf('\n') < 0) return null
@@ -157,51 +157,84 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
    */
   function CodeQuoteDock(props) {
     var box = React.useState(function () {
-      return { prev: null, lastToken: null, latest: null, latestState: null, foldTimer: null }
+      return {
+        prev: null, lastToken: null, latest: null, latestState: null,
+        foldTimer: null, deferCount: 0, retries: 0, folding: false,
+      }
     })[0]
     var input = props.useInput(function (state) { return state })
     box.latestState = input === undefined || input === null ? null : input
     box.latest = input === undefined || input === null ? null : input.draft
 
+    function pasteLive() {
+      var state = box.latestState
+      return state !== null && state !== undefined && state.paste !== undefined
+    }
+
     /**
-     * 一次折叠尝试：总是基于「当前最新草稿」重算差异与 rev，再走 RPC。
-     * fromPasteWindow=true 表示由粘贴升级窗口的延迟回调触发——此窗口内
-     * （内核 paste attempt 存活期间）草稿还会被内核异步改写（路径 token →
-     * @path 芯片，独立事务、draftRev 前进），过早折叠会拿到过期 span/rev，
-     * 产生裸 token 回退或半残留（0.3.4 修复的大段粘贴问题）。
+     * 一次折叠尝试（0.3.5 语义）：
+     *  - 内核粘贴升级窗口（state.paste 存活）：有界等待——最多 3×250ms，超时后
+     *    照常折叠（我们自己的 insert-ref 事务会终结 paste attempt，之后的升级
+     *    不会再破坏芯片）；0.3.4 的「等窗口关闭」可能因 attempt 迟迟不关而永不
+     *    折叠，已废弃。
+     *  - RPC 返回时草稿又变了：窗口内自动从冻结 base 重算重试（≤3 次），窗口外
+     *    跳过并轻提示。base 只在折叠落定/放弃时推进。
+     *  - 每次折叠都基于「当时最新草稿」重算 diff 与 rev，不复用旧快照。
      */
-    function attemptFold(fromPasteWindow) {
+    function attemptFold() {
+      if (box.folding) return
       var actions = props.inputActions
       var next = box.latest
       var state = box.latestState
       if (typeof actions !== 'object' || actions === null || next === null) return
-      // 内核粘贴升级窗口未关：冻结 base（不推进 box.prev），等窗口结束重算。
-      if (state !== null && state !== undefined && state.paste !== undefined) {
+      if (pasteLive() && box.deferCount < 3) {
+        box.deferCount++
+        console.debug('[code-quote] paste upgrade window live, deferring fold (' + box.deferCount + '/3)')
         if (box.foldTimer === null) {
           box.foldTimer = setTimeout(function () {
             box.foldTimer = null
-            attemptFold(true)
-          }, 300)
+            attemptFold()
+          }, 250)
         }
         return
       }
+      var inWindow = box.deferCount > 0
+      box.deferCount = 0
       var prev = box.prev
-      box.prev = next
-      if (prev === null || next === prev) return
-      // 折叠的 undo（token 被机器还原成原始粘贴）：放行，不重新折叠。
-      if (box.lastToken !== null && prev.indexOf(box.lastToken) >= 0 && next.indexOf(box.lastToken) < 0) return
+      box.folding = true
       var change = diffInsert(prev, next)
-      if (change === null || change.text.length < MIN_INSERTED) return
-      var quote = parseQuote(change.text)
-      if (quote === null) return
-      var id = makeId()
       var rev = state !== null && state !== undefined && typeof state.draftRev === 'number' ? state.draftRev : 0
+      if (prev === null || next === prev || change === null || change.text.length < MIN_INSERTED) {
+        box.folding = false
+        box.prev = next
+        return
+      }
+      // 折叠的 undo（token 被机器还原成原始粘贴）：放行，不重新折叠。
+      if (box.lastToken !== null && prev.indexOf(box.lastToken) >= 0 && next.indexOf(box.lastToken) < 0) {
+        box.folding = false
+        box.prev = next
+        return
+      }
+      var quote = parseQuote(change.text)
+      if (quote === null) {
+        box.folding = false
+        box.prev = next
+        return
+      }
+      var id = makeId()
       putQuote({ id: id, header: quote.header, code: quote.code }).then(function () {
-        // RPC 往返期间草稿又变了：放弃本次（防重复/防错位）。
         if (box.latest !== next) {
-          if (fromPasteWindow === true) {
-            showToast('代码引用折叠已跳过：粘贴后输入仍在变化，请重新粘贴该段')
+          // RPC 期间草稿又变了：窗口内自动重试（base 未推进，下一次 publish
+          // 会基于最新草稿重算）；窗口外放弃并提示。
+          box.folding = false
+          if (inWindow && box.retries < 3) {
+            box.retries++
+            console.debug('[code-quote] draft changed during RPC, will re-fold from frozen base (' + box.retries + '/3)')
+            return
           }
+          box.retries = 0
+          box.prev = next
+          showToast('代码引用折叠已跳过：粘贴后输入仍在变化，请重新粘贴该段')
           return
         }
         rememberId(id, quote.header)
@@ -210,21 +243,31 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
         // 折叠。两路用同一 id，重复 token 会被 host 去重。
         // token 以 @ 开头：发送后用户气泡被内核渲染成文件图标芯片。
         // 0.3.3：token header 必须是完整路径（含 /）——内核气泡芯片的显示文案
-        // 取「最后一个 / 段」（MessageItem projectUserText displayLabel），
-        // 机器码必须躲在非显示段才不可见；0.3.1/0.3.2 的纯文件名 header 曾使
-        // 机器码整段漏出到气泡芯片。输入框长度由 chip 模式解决，不靠缩短 token。
-        if (chipMode && mintChip(props, change, id, quote.header, rev)) return
+        // 取「最后一个 / 段」，机器码必须躲在非显示段才不可见。
+        if (chipMode && mintChip(props, change, id, quote.header, rev)) {
+          console.debug('[code-quote] folded via chip ' + id)
+          box.folding = false
+          box.retries = 0
+          box.prev = next
+          return
+        }
         var token = '@⟦代码引用#' + id + '⟧' + quote.header
         box.lastToken = token
         actions.setDraft(next.slice(0, change.start) + token + next.slice(change.end))
+        console.debug('[code-quote] folded via token ' + id)
+        box.folding = false
+        box.retries = 0
+        box.prev = next
       }, function (error) {
+        box.folding = false
+        box.prev = next
         // 快照保存失败不再静默：明示用户本次折叠未发生（#4）。
         showToast('代码引用折叠失败：' + (error && error.message ? error.message : '快照保存失败'))
       })
     }
 
     React.useEffect(function () {
-      attemptFold(false)
+      attemptFold()
     })
 
     return null
