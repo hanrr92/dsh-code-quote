@@ -173,62 +173,133 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     }
 
     /**
-     * 0.4.0 主路径：window 捕获阶段拦截 paste（window 先于 document——内核在
-     * document 捕获阶段注册了 paste 处理并 stopPropagation，document 级监听
-     * 收不到事件，0.3.9 的「paste captured 不出现」即此故；且内核会把引用形
-     * 粘贴整个吃进自己的附件/引用芯片，草稿只剩 114 字符的路径行——实测
-     * draftLen=114 证实）。引用形粘贴由我们接管：preventDefault +
-     * stopImmediatePropagation，代码不进内核附件，走我们自己的快照折叠。
-     * 非引用形粘贴放行（内核/默认行为不变）。
+     * 0.4.1 核心：在光标区间落一枚我们的引用（chip 优先，token 回退）。
+     * 由 keydown/paste 两条拦截路径共用。RPC 前后草稿必须一致，否则放弃并提示。
+     */
+    function foldAtSpan(text, selStart, selEnd, draftAtPaste, rev, via) {
+      var actions = props.inputActions
+      if (typeof actions !== 'object' || actions === null) return
+      var quote = parseQuote(text)
+      if (quote === null) return
+      var id = makeId()
+      console.log('[code-quote] intercept(' + via + '): quote ' + quote.header + ' (' + quote.code.length + ' chars), caret=' + selStart + '..' + selEnd + ', id=' + id)
+      putQuote({ id: id, header: quote.header, code: quote.code }).then(function () {
+        var cur = box.latest === null ? '' : box.latest
+        if (cur !== draftAtPaste) {
+          console.log('[code-quote] intercept abort: draft changed during RPC')
+          showToast('代码引用折叠已跳过：粘贴期间输入框内容变化，请重新粘贴')
+          return
+        }
+        rememberId(id, quote.header)
+        if (chipMode && mintChip(props, { start: selStart, end: selEnd }, id, quote.header, rev)) {
+          console.log('[code-quote] folded via chip ' + id + ' (' + via + ')')
+          return
+        }
+        var token = '@⟦代码引用#' + id + '⟧' + quote.header
+        var next = draftAtPaste.slice(0, selStart) + token + draftAtPaste.slice(selEnd)
+        box.lastToken = token
+        actions.setDraft(next)
+        console.log('[code-quote] folded via token ' + id + ' (' + via + ')')
+      }, function (error) {
+        console.error('[code-quote] fold failed: ' + (error && error.message ? error.message : String(error)))
+        showToast('代码引用折叠失败：' + (error && error.message ? error.message : '快照保存失败'))
+      })
+    }
+
+    /** 非引用形文本的手工插入（keydown 抢权后原生 paste 已被阻止，由我们代插）。 */
+    function insertPlainAt(text, selStart, selEnd, target, via) {
+      var actions = props.inputActions
+      if (typeof actions !== 'object' || actions === null || text === null || text === '') return
+      var draft = box.latest === null ? '' : box.latest
+      var next = draft.slice(0, selStart) + text + draft.slice(selEnd)
+      actions.setDraft(next)
+      var pos = selStart + text.length
+      setTimeout(function () {
+        try { target.setSelectionRange(pos, pos) } catch (e) {}
+      }, 0)
+      console.log('[code-quote] plain insert (' + via + '): ' + text.length + ' chars at ' + selStart)
+    }
+
+    function composerTarget(e) {
+      var target = e.target
+      if (!target || target.tagName !== 'TEXTAREA' || typeof target.selectionStart !== 'number') return null
+      return target
+    }
+
+    /**
+     * 0.4.1 主路径：window 捕获阶段拦 keydown Ctrl/Cmd+V。实测内核不走 paste
+     * 事件（0.4.0 连 window 捕获的 paste 都收不到），它在 keydown 后用异步
+     * Clipboard API 读剪贴板、自行合成插入（大段引用形粘贴被吃进内核附件，
+     * 草稿只留 114 字符路径行）。我们抢先：preventDefault + stopImmediate，
+     * 自己读剪贴板——引用形走折叠，非引用形代插原文并恢复光标。
      */
     React.useEffect(function () {
-      var handler = function (e) {
+      var keyHandler = function (e) {
         try {
-          var target = e.target
-          var text = e.clipboardData ? e.clipboardData.getData('text/plain') : null
-          console.log('[code-quote] paste event on ' + (target && target.tagName) + ', textLen=' + (text ? text.length : 'null'))
-          if (!text || text.length < 10) return
-          var actions = props.inputActions
-          if (typeof actions !== 'object' || actions === null) return
-          // 只接管 composer 文本域里的粘贴；页面其他输入框不碰
-          if (!target || target.tagName !== 'TEXTAREA' || typeof target.selectionStart !== 'number') return
-          var quote = parseQuote(text)
-          if (quote === null) return
+          var isPasteCombo = (e.ctrlKey || e.metaKey) && !e.altKey
+            && (e.key === 'v' || e.key === 'V' || e.keyCode === 86)
+          if (!isPasteCombo) return
+          var target = composerTarget(e)
+          if (target === null) return
+          console.log('[code-quote] keydown paste combo on TEXTAREA (shift=' + e.shiftKey + ')')
+          // 抢权：阻断内核 keydown 处理与原生 paste 事件
           e.preventDefault()
           e.stopImmediatePropagation()
           var selStart = target.selectionStart
           var selEnd = target.selectionEnd
           var draftAtPaste = box.latest === null ? '' : box.latest
           var rev = box.latestState !== null && box.latestState !== undefined && typeof box.latestState.draftRev === 'number' ? box.latestState.draftRev : 0
-          var id = makeId()
-          console.log('[code-quote] intercept: quote ' + quote.header + ' (' + quote.code.length + ' chars), caret=' + selStart + '..' + selEnd + ', id=' + id)
-          putQuote({ id: id, header: quote.header, code: quote.code }).then(function () {
-            var cur = box.latest === null ? '' : box.latest
-            if (cur !== draftAtPaste) {
-              console.log('[code-quote] intercept abort: draft changed during RPC')
-              showToast('代码引用折叠已跳过：粘贴期间输入框内容变化，请重新粘贴')
-              return
+          if (typeof navigator === 'undefined' || !navigator.clipboard || typeof navigator.clipboard.readText !== 'function') {
+            console.error('[code-quote] clipboard API unavailable')
+            showToast('剪贴板 API 不可用，本次粘贴被拦截，请重试')
+            return
+          }
+          navigator.clipboard.readText().then(function (text) {
+            console.log('[code-quote] clipboard read ok: ' + (text ? text.length : 0) + ' chars')
+            if (!text || text.length < 10) return
+            if (parseQuote(text) !== null) {
+              foldAtSpan(text, selStart, selEnd, draftAtPaste, rev, 'keydown')
+            } else {
+              insertPlainAt(text, selStart, selEnd, target, 'keydown')
             }
-            rememberId(id, quote.header)
-            if (chipMode && mintChip(props, { start: selStart, end: selEnd }, id, quote.header, rev)) {
-              console.log('[code-quote] folded via chip ' + id + ' (paste intercepted)')
-              return
-            }
-            var token = '@⟦代码引用#' + id + '⟧' + quote.header
-            var next = draftAtPaste.slice(0, selStart) + token + draftAtPaste.slice(selEnd)
-            box.lastToken = token
-            actions.setDraft(next)
-            console.log('[code-quote] folded via token ' + id + ' (paste intercepted)')
-          }, function (error) {
-            console.error('[code-quote] fold failed: ' + (error && error.message ? error.message : String(error)))
-            showToast('代码引用折叠失败：' + (error && error.message ? error.message : '快照保存失败'))
+          }, function (err) {
+            console.error('[code-quote] clipboard readText failed: ' + (err && err.message ? err.message : String(err)))
+            showToast('剪贴板读取失败，本次粘贴被拦截；可改用右键粘贴')
           })
+        } catch (err) {
+          console.error('[code-quote] keydown handler crashed', err)
+        }
+      }
+      window.addEventListener('keydown', keyHandler, true)
+      return function () { window.removeEventListener('keydown', keyHandler, true) }
+    }, [])
+
+    /**
+     * 兜底路径：仍会产生 paste 事件的入口（右键菜单粘贴等）——window 捕获
+     * 阶段，引用形接管，非引用形放行给原生。
+     */
+    React.useEffect(function () {
+      var pasteHandler = function (e) {
+        try {
+          var target = composerTarget(e)
+          if (target === null) return
+          var text = e.clipboardData ? e.clipboardData.getData('text/plain') : null
+          console.log('[code-quote] paste event on ' + (e.target && e.target.tagName) + ', textLen=' + (text ? text.length : 'null'))
+          if (!text || text.length < 10) return
+          if (parseQuote(text) === null) return
+          e.preventDefault()
+          e.stopImmediatePropagation()
+          var selStart = target.selectionStart
+          var selEnd = target.selectionEnd
+          var draftAtPaste = box.latest === null ? '' : box.latest
+          var rev = box.latestState !== null && box.latestState !== undefined && typeof box.latestState.draftRev === 'number' ? box.latestState.draftRev : 0
+          foldAtSpan(text, selStart, selEnd, draftAtPaste, rev, 'paste-event')
         } catch (err) {
           console.error('[code-quote] paste handler crashed', err)
         }
       }
-      window.addEventListener('paste', handler, true)
-      return function () { window.removeEventListener('paste', handler, true) }
+      window.addEventListener('paste', pasteHandler, true)
+      return function () { window.removeEventListener('paste', pasteHandler, true) }
     }, [])
 
     function pasteLive() {
@@ -246,8 +317,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
 
     /**
      * 兜底路径（0.3.8 语义）：草稿稳定 SETTLE_MS 后一次性 diff 整段。
-     * 0.4.0 起引用形粘贴在 window 捕获阶段被拦截（走主路径），此兜底只服务
-     * 非粘贴来源的大段插入。
+     * 0.4.x 引用形粘贴在 keydown/paste 拦截层接管，此兜底只服务剩余场景。
      */
     function attemptFold() {
       if (box.folding) return
