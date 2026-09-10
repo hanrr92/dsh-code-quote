@@ -110,7 +110,9 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
   /**
    * 识别「header 行 + 代码体」粘贴：首行形如 路径:行号 或 路径:起-止，
    * 其后至少 1 行代码（单行代码需 ≥40 字符）。不含换行或已含 token 字符时拒绝。
-   * header 先剥 markdown 围栏（```）残留，避免 IDE/网页复制带入的围栏污染 header。
+   * header 先剥 markdown 围栏（```）残留；再剥内核粘贴升级可能加上的 @ 前缀
+   * （0.3.4：内核会把粘贴文本里的路径 token 异步升级为 @path 芯片，我们拿到
+   * 的差异文本首行可能已带 @），避免 header 变成 "@路径"。
    */
   function parseQuote(text) {
     if (text.indexOf('\n') < 0) return null
@@ -119,7 +121,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     var head = 0
     while (head < lines.length && lines[head].trim() === '') head++
     if (head >= lines.length) return null
-    var headerLine = lines[head].trim().replace(/^`+|`+$/g, '')
+    var headerLine = lines[head].trim().replace(/^`+|`+$/g, '').replace(/^@/, '')
     if (!/^(\S.*?):(\d+)(?:-(\d+))?$/.test(headerLine)) return null
     var end = lines.length
     while (end > head + 1 && lines[end - 1].trim() === '') end--
@@ -154,15 +156,35 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
    * 通过 session 标准 kit 的 useInput 订阅草稿、inputActions 改写草稿。
    */
   function CodeQuoteDock(props) {
-    var box = React.useState(function () { return { prev: null, lastToken: null, latest: null, latestState: null } })[0]
+    var box = React.useState(function () {
+      return { prev: null, lastToken: null, latest: null, latestState: null, foldTimer: null }
+    })[0]
     var input = props.useInput(function (state) { return state })
     box.latestState = input === undefined || input === null ? null : input
     box.latest = input === undefined || input === null ? null : input.draft
 
-    React.useEffect(function () {
+    /**
+     * 一次折叠尝试：总是基于「当前最新草稿」重算差异与 rev，再走 RPC。
+     * fromPasteWindow=true 表示由粘贴升级窗口的延迟回调触发——此窗口内
+     * （内核 paste attempt 存活期间）草稿还会被内核异步改写（路径 token →
+     * @path 芯片，独立事务、draftRev 前进），过早折叠会拿到过期 span/rev，
+     * 产生裸 token 回退或半残留（0.3.4 修复的大段粘贴问题）。
+     */
+    function attemptFold(fromPasteWindow) {
       var actions = props.inputActions
       var next = box.latest
+      var state = box.latestState
       if (typeof actions !== 'object' || actions === null || next === null) return
+      // 内核粘贴升级窗口未关：冻结 base（不推进 box.prev），等窗口结束重算。
+      if (state !== null && state !== undefined && state.paste !== undefined) {
+        if (box.foldTimer === null) {
+          box.foldTimer = setTimeout(function () {
+            box.foldTimer = null
+            attemptFold(true)
+          }, 300)
+        }
+        return
+      }
       var prev = box.prev
       box.prev = next
       if (prev === null || next === prev) return
@@ -173,9 +195,15 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       var quote = parseQuote(change.text)
       if (quote === null) return
       var id = makeId()
+      var rev = state !== null && state !== undefined && typeof state.draftRev === 'number' ? state.draftRev : 0
       putQuote({ id: id, header: quote.header, code: quote.code }).then(function () {
-        // RPC 往返期间草稿又变了：放弃折叠，不打扰用户输入。
-        if (box.latest !== next) return
+        // RPC 往返期间草稿又变了：放弃本次（防重复/防错位）。
+        if (box.latest !== next) {
+          if (fromPasteWindow === true) {
+            showToast('代码引用折叠已跳过：粘贴后输入仍在变化，请重新粘贴该段')
+          }
+          return
+        }
         rememberId(id, quote.header)
         // chip 模式（#2，0.3.2 起默认开）：先试真引用 chip（bail 区间替换，
         // 与内置 @ 引用同一条 insert-ref 机制）；失败/关闭回退到 setDraft token
@@ -185,9 +213,6 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
         // 取「最后一个 / 段」（MessageItem projectUserText displayLabel），
         // 机器码必须躲在非显示段才不可见；0.3.1/0.3.2 的纯文件名 header 曾使
         // 机器码整段漏出到气泡芯片。输入框长度由 chip 模式解决，不靠缩短 token。
-        var rev = box.latestState !== null && box.latestState !== undefined && typeof box.latestState.draftRev === 'number'
-          ? box.latestState.draftRev
-          : 0
         if (chipMode && mintChip(props, change, id, quote.header, rev)) return
         var token = '@⟦代码引用#' + id + '⟧' + quote.header
         box.lastToken = token
@@ -196,6 +221,10 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
         // 快照保存失败不再静默：明示用户本次折叠未发生（#4）。
         showToast('代码引用折叠失败：' + (error && error.message ? error.message : '快照保存失败'))
       })
+    }
+
+    React.useEffect(function () {
+      attemptFold(false)
     })
 
     return null
