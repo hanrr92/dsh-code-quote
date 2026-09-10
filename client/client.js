@@ -59,6 +59,19 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     }
   } catch (e) {}
 
+  // 0.3.9 诊断：原生 paste 捕获——绕开 draft 机制直接拿剪贴板原始文本，
+  // 用于判定内核把粘贴「留在了草稿里」还是「消费成了别的结构」。
+  var lastPasteText = null
+  function capturePaste(e) {
+    try {
+      var t = e.clipboardData ? e.clipboardData.getData('text/plain') : null
+      if (t && t.length >= 30) {
+        lastPasteText = t
+        console.log('[code-quote] paste captured: ' + t.length + ' chars, head=' + JSON.stringify(t.slice(0, 60)))
+      }
+    } catch (err) {}
+  }
+
   function rememberId(id, header) {
     registry[id] = header
     try { sessionStorage.setItem(REGISTRY_KEY, JSON.stringify(registry)) } catch (e) {}
@@ -186,11 +199,9 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     }
 
     /**
-     * 0.3.8 语义：草稿一变就冻结 base（box.prev 不推进）并重置防抖定时器；
-     * 草稿稳定 SETTLE_MS 后一次性 diff 整段。实测内核把粘贴分块写入草稿
-     * （0.3.7 日志：只有 null/1chars 小差异 + unchanged 刷屏），逐次 diff 永远
-     * 看不到整段插入——settle 后统一 diff 是唯一可靠口径，分块粘贴、内核
-     * 粘贴升级中途改写均被覆盖。
+     * 0.3.8 语义：草稿一变就冻结 base 并重置防抖；稳定 SETTLE_MS 后一次性
+     * diff 整段。0.3.9 补充 settle 现场诊断：base/草稿长度、是否含粘贴原文、
+     * 草稿首段预览——判定内核对大段粘贴做了什么。
      */
     function attemptFold() {
       if (box.folding) return
@@ -222,7 +233,12 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       if (typeof actions !== 'object' || actions === null || next === null) return
       var prev = box.prev
       if (next === prev) return
-      // 内核粘贴升级窗口仍存活：再等等（有界），它落地后草稿还会变，反正会重触发。
+      var diag = 'settle: baseLen=' + prev.length + ' draftLen=' + next.length
+      if (lastPasteText !== null) {
+        diag += ' pasteLen=' + lastPasteText.length + ' pasteKeptInDraft=' + (next.indexOf(lastPasteText.slice(0, 50)) >= 0)
+      }
+      diag += ' draftHead=' + JSON.stringify(next.slice(0, 100))
+      console.log('[code-quote] ' + diag)
       if (pasteLive() && box.deferCount < 3) {
         box.deferCount++
         console.log('[code-quote] defer ' + box.deferCount + '/3: kernel paste upgrade window live')
@@ -262,7 +278,6 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       console.log('[code-quote] quote matched: ' + quote.header + ' (' + quote.code.length + ' chars), id=' + id)
       putQuote({ id: id, header: quote.header, code: quote.code }).then(function () {
         if (box.latest !== next) {
-          // RPC 期间草稿又变了：base 仍冻结在粘贴前，回到同一 base 重算重试（有界）。
           box.folding = false
           if (box.retries < 3) {
             box.retries++
@@ -314,6 +329,9 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
   exports.inject = ['slots', 'sessions', 'inputTriggers']
   exports.apply = (ctx) => {
     ctxSessions = ctx.sessions
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('paste', capturePaste, true)
+    }
     if (ctx.inputTriggers && typeof ctx.inputTriggers.registerSource === 'function') {
       // chip 的发送时序列化（#2）：永不忘 throw——registry 丢失（如换标签页）时
       // 退化为无 header 的 token，host 端快照仍能补全完整 header 并注入。
