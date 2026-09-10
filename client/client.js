@@ -94,6 +94,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
 
   /** 前后缀公共扫描：返回 next 相对 prev 的纯插入区间（与输入机 diffEdit 同法）。 */
   function diffInsert(prev, next) {
+    if (!prev || !next) return null
     if (next.length <= prev.length) return null
     var start = 0
     var maxStart = Math.min(prev.length, next.length)
@@ -172,14 +173,16 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     }
 
     /**
-     * 一次折叠尝试（0.3.5 语义）：
+     * 一次折叠尝试（0.3.5/0.3.6 语义）：
      *  - 内核粘贴升级窗口（state.paste 存活）：有界等待——最多 3×250ms，超时后
      *    照常折叠（我们自己的 insert-ref 事务会终结 paste attempt，之后的升级
-     *    不会再破坏芯片）；0.3.4 的「等窗口关闭」可能因 attempt 迟迟不关而永不
-     *    折叠，已废弃。
+     *    不会再破坏芯片）。
      *  - RPC 返回时草稿又变了：窗口内自动从冻结 base 重算重试（≤3 次），窗口外
      *    跳过并轻提示。base 只在折叠落定/放弃时推进。
      *  - 每次折叠都基于「当时最新草稿」重算 diff 与 rev，不复用旧快照。
+     *  - 0.3.6：base 判空必须在 diffInsert 之前（首次挂载 prev 为 null），
+     *    且 attemptFold 整体 try/catch——任何异常都不允许打崩 dock 槽位
+     *    （0.3.4/0.3.5 因判空后置导致挂载即崩溃、折叠彻底失效）。
      */
     function attemptFold() {
       if (box.folding) return
@@ -201,10 +204,15 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       var inWindow = box.deferCount > 0
       box.deferCount = 0
       var prev = box.prev
+      if (prev === null || next === prev) {
+        box.folding = false
+        box.prev = next
+        return
+      }
       box.folding = true
       var change = diffInsert(prev, next)
       var rev = state !== null && state !== undefined && typeof state.draftRev === 'number' ? state.draftRev : 0
-      if (prev === null || next === prev || change === null || change.text.length < MIN_INSERTED) {
+      if (change === null || change.text.length < MIN_INSERTED) {
         box.folding = false
         box.prev = next
         return
@@ -267,7 +275,12 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     }
 
     React.useEffect(function () {
-      attemptFold()
+      try {
+        attemptFold()
+      } catch (e) {
+        console.error('[code-quote] fold attempt crashed', e)
+        box.folding = false
+      }
     })
 
     return null
