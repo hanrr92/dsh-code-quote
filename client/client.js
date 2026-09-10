@@ -59,19 +59,6 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     }
   } catch (e) {}
 
-  // 0.3.9 诊断：原生 paste 捕获——绕开 draft 机制直接拿剪贴板原始文本，
-  // 用于判定内核把粘贴「留在了草稿里」还是「消费成了别的结构」。
-  var lastPasteText = null
-  function capturePaste(e) {
-    try {
-      var t = e.clipboardData ? e.clipboardData.getData('text/plain') : null
-      if (t && t.length >= 30) {
-        lastPasteText = t
-        console.log('[code-quote] paste captured: ' + t.length + ' chars, head=' + JSON.stringify(t.slice(0, 60)))
-      }
-    } catch (err) {}
-  }
-
   function rememberId(id, header) {
     registry[id] = header
     try { sessionStorage.setItem(REGISTRY_KEY, JSON.stringify(registry)) } catch (e) {}
@@ -84,8 +71,8 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     return parts.length > 0 ? parts[parts.length - 1] : clean
   }
 
-  /** 尝试在粘贴区间 mint 真 occurrence chip（bail 区间替换）；任何失败返回 false 走 token 回退。 */
-  function mintChip(props, change, id, header, rev) {
+  /** 在区间上 mint 真 occurrence chip（bail 区间替换/插入）；任何失败返回 false。 */
+  function mintChip(props, span, id, header, rev) {
     try {
       if (!ctxSessions || !props.sessionId) return false
       var actx = ctxSessions.scope(props.sessionId)
@@ -98,7 +85,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
           appearance: 'file',
           clipboardText: header,
         },
-        span: { start: change.start, end: change.end, draftRev: rev },
+        span: { start: span.start, end: span.end, draftRev: rev },
       })
       return applied === true
     } catch (e) {
@@ -108,7 +95,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
 
   /** 前后缀公共扫描：返回 next 相对 prev 的纯插入区间（与输入机 diffEdit 同法）。 */
   function diffInsert(prev, next) {
-    if (!prev || !next) return null
+    if (prev === null || next === null) return null
     if (next.length <= prev.length) return null
     var start = 0
     var maxStart = Math.min(prev.length, next.length)
@@ -125,7 +112,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
   /**
    * 识别「header 行 + 代码体」粘贴：首行形如 路径:行号 或 路径:起-止，
    * 其后至少 1 行代码（单行代码需 ≥40 字符）。不含换行或已含 token 字符时拒绝。
-   * header 先剥 markdown 围栏（```）残留；再剥内核粘贴升级可能加上的 @ 前缀。
+   * header 先剥 markdown 围栏（```）残留与可能的 @ 前缀。
    */
   function parseQuote(text) {
     if (text.indexOf('\n') < 0) return null
@@ -185,6 +172,65 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       console.log('[code-quote] dock mounted, sessionId=' + props.sessionId + ', hasActions=' + (props.inputActions !== undefined && props.inputActions !== null))
     }
 
+    /**
+     * 0.4.0 主路径：window 捕获阶段拦截 paste（window 先于 document——内核在
+     * document 捕获阶段注册了 paste 处理并 stopPropagation，document 级监听
+     * 收不到事件，0.3.9 的「paste captured 不出现」即此故；且内核会把引用形
+     * 粘贴整个吃进自己的附件/引用芯片，草稿只剩 114 字符的路径行——实测
+     * draftLen=114 证实）。引用形粘贴由我们接管：preventDefault +
+     * stopImmediatePropagation，代码不进内核附件，走我们自己的快照折叠。
+     * 非引用形粘贴放行（内核/默认行为不变）。
+     */
+    React.useEffect(function () {
+      var handler = function (e) {
+        try {
+          var target = e.target
+          var text = e.clipboardData ? e.clipboardData.getData('text/plain') : null
+          console.log('[code-quote] paste event on ' + (target && target.tagName) + ', textLen=' + (text ? text.length : 'null'))
+          if (!text || text.length < 10) return
+          var actions = props.inputActions
+          if (typeof actions !== 'object' || actions === null) return
+          // 只接管 composer 文本域里的粘贴；页面其他输入框不碰
+          if (!target || target.tagName !== 'TEXTAREA' || typeof target.selectionStart !== 'number') return
+          var quote = parseQuote(text)
+          if (quote === null) return
+          e.preventDefault()
+          e.stopImmediatePropagation()
+          var selStart = target.selectionStart
+          var selEnd = target.selectionEnd
+          var draftAtPaste = box.latest === null ? '' : box.latest
+          var rev = box.latestState !== null && box.latestState !== undefined && typeof box.latestState.draftRev === 'number' ? box.latestState.draftRev : 0
+          var id = makeId()
+          console.log('[code-quote] intercept: quote ' + quote.header + ' (' + quote.code.length + ' chars), caret=' + selStart + '..' + selEnd + ', id=' + id)
+          putQuote({ id: id, header: quote.header, code: quote.code }).then(function () {
+            var cur = box.latest === null ? '' : box.latest
+            if (cur !== draftAtPaste) {
+              console.log('[code-quote] intercept abort: draft changed during RPC')
+              showToast('代码引用折叠已跳过：粘贴期间输入框内容变化，请重新粘贴')
+              return
+            }
+            rememberId(id, quote.header)
+            if (chipMode && mintChip(props, { start: selStart, end: selEnd }, id, quote.header, rev)) {
+              console.log('[code-quote] folded via chip ' + id + ' (paste intercepted)')
+              return
+            }
+            var token = '@⟦代码引用#' + id + '⟧' + quote.header
+            var next = draftAtPaste.slice(0, selStart) + token + draftAtPaste.slice(selEnd)
+            box.lastToken = token
+            actions.setDraft(next)
+            console.log('[code-quote] folded via token ' + id + ' (paste intercepted)')
+          }, function (error) {
+            console.error('[code-quote] fold failed: ' + (error && error.message ? error.message : String(error)))
+            showToast('代码引用折叠失败：' + (error && error.message ? error.message : '快照保存失败'))
+          })
+        } catch (err) {
+          console.error('[code-quote] paste handler crashed', err)
+        }
+      }
+      window.addEventListener('paste', handler, true)
+      return function () { window.removeEventListener('paste', handler, true) }
+    }, [])
+
     function pasteLive() {
       var state = box.latestState
       return state !== null && state !== undefined && state.paste !== undefined
@@ -199,9 +245,9 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
     }
 
     /**
-     * 0.3.8 语义：草稿一变就冻结 base 并重置防抖；稳定 SETTLE_MS 后一次性
-     * diff 整段。0.3.9 补充 settle 现场诊断：base/草稿长度、是否含粘贴原文、
-     * 草稿首段预览——判定内核对大段粘贴做了什么。
+     * 兜底路径（0.3.8 语义）：草稿稳定 SETTLE_MS 后一次性 diff 整段。
+     * 0.4.0 起引用形粘贴在 window 捕获阶段被拦截（走主路径），此兜底只服务
+     * 非粘贴来源的大段插入。
      */
     function attemptFold() {
       if (box.folding) return
@@ -233,12 +279,7 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       if (typeof actions !== 'object' || actions === null || next === null) return
       var prev = box.prev
       if (next === prev) return
-      var diag = 'settle: baseLen=' + prev.length + ' draftLen=' + next.length
-      if (lastPasteText !== null) {
-        diag += ' pasteLen=' + lastPasteText.length + ' pasteKeptInDraft=' + (next.indexOf(lastPasteText.slice(0, 50)) >= 0)
-      }
-      diag += ' draftHead=' + JSON.stringify(next.slice(0, 100))
-      console.log('[code-quote] ' + diag)
+      console.log('[code-quote] settle: baseLen=' + prev.length + ' draftLen=' + next.length + ' draftHead=' + JSON.stringify(next.slice(0, 100)))
       if (pasteLive() && box.deferCount < 3) {
         box.deferCount++
         console.log('[code-quote] defer ' + box.deferCount + '/3: kernel paste upgrade window live')
@@ -329,9 +370,6 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
   exports.inject = ['slots', 'sessions', 'inputTriggers']
   exports.apply = (ctx) => {
     ctxSessions = ctx.sessions
-    if (typeof document !== 'undefined' && document.addEventListener) {
-      document.addEventListener('paste', capturePaste, true)
-    }
     if (ctx.inputTriggers && typeof ctx.inputTriggers.registerSource === 'function') {
       // chip 的发送时序列化（#2）：永不忘 throw——registry 丢失（如换标签页）时
       // 退化为无 header 的 token，host 端快照仍能补全完整 header 并注入。
