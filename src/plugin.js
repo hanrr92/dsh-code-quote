@@ -330,7 +330,9 @@ export function apply(ctx) {
   loggerRef = ctx.logger
   loadSnapshots(ctx.logger)
 
-  ctx.inject(['webServer'], (host) => {
+  // 0.5.1：'sessions'（SessionStore，header.cwd 按会话解析文件）必须显式声明
+  // 注入——未声明就摸 ctx.sessions 会抛 "cannot get property without inject"。
+  ctx.inject(['webServer', 'sessions'], (host) => {
     host.effect(() => {
       const dispose = host.webServer.register({
         kind: 'exact',
@@ -385,7 +387,7 @@ export function apply(ctx) {
           }
           try {
             const body = await readJsonBody(request, MAX_BODY_BYTES)
-            const result = fetchQuoteFromDisk(body, ctx.sessions)
+            const result = fetchQuoteFromDisk(body, host.sessions)
             if (result.ok) {
               await persistSnapshots()
               ctx.logger?.info?.('[dsh-code-quote] fetched ' + result.codeChars + ' chars from ' + result.path)
