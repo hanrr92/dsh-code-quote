@@ -18,8 +18,8 @@
  */
 
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, resolve as resolvePath } from 'node:path'
+import { mkdirSync, readFileSync, statSync } from 'node:fs'
 import { rename, writeFile } from 'node:fs/promises'
 
 const MAX_ENTRIES = 64
@@ -200,6 +200,110 @@ function putQuote(payload) {
   return { ok: true }
 }
 
+/* ---------- 仅路径行引用（0.5.0）：dsh-better-sidebar 对 >500 字符的选区
+ * 只插入一行「相对路径:起止行」并把代码丢弃（SELECTION_LIMIT，实测 44 行代码
+ * 只剩 114 字符路径行）。客户端识别该签名后调用 /dsh-code-quote/fetch，
+ * 由本半按会话工作目录读磁盘文件、按行号提取代码、存入快照表——
+ * 大段侧边栏引用从此也能折叠、模型也能拿到完整代码。 ---------- */
+
+/** 近期会话 cwd 缓存（pre-step 时刷新）；/fetch 的解析候选之一。 */
+const recentCwds = []
+
+function rememberCwd(cwd) {
+  if (typeof cwd !== 'string' || cwd === '' || !isAbsolute(cwd)) return
+  if (!recentCwds.includes(cwd)) {
+    recentCwds.unshift(cwd)
+    while (recentCwds.length > 8) recentCwds.pop()
+  }
+}
+
+/** 「仅路径行」签名：整段插入（trim 后）恰为一行 路径:行号 或 路径:起-止。 */
+export function parseHeaderOnly(text) {
+  if (typeof text !== 'string') return null
+  const trimmed = text.trim()
+  if (trimmed === '' || trimmed.includes('\n') || trimmed.includes('⟦')) return null
+  if (!trimmed.includes('/') && !trimmed.includes('\\')) return null
+  if (!/^(\S.*?):(\d+)(?:-(\d+))?$/.test(trimmed)) return null
+  if (trimmed.length < 20) return null
+  return { header: trimmed }
+}
+
+/** 按 1-based 闭区间行号提取代码；越界自动收口，结果去掉首尾空行。 */
+export function extractFileLines(content, start, end) {
+  if (typeof content !== 'string' || content.includes('\u0000')) return null
+  const lines = content.split('\n')
+  const from = Math.max(1, Math.floor(start)) - 1
+  const to = Math.min(lines.length, Math.floor(end))
+  if (from < 0 || from >= lines.length || to <= from) return null
+  let code = lines.slice(from, to).join('\n').replace(/^\n+|\n+$/g, '')
+  if (code === '') return null
+  if (code.length > MAX_CODE_CHARS) code = code.slice(0, MAX_CODE_CHARS)
+  return code
+}
+
+/**
+ * 解析 header 并在候选工作目录下读文件取行；返回 { code } 或 { error }。
+ * 候选顺序：绝对路径直读 → 会话 header cwd（SessionStore.get）→ pre-step
+ * 缓存 cwd → DSH_CODE_QUOTE_WORKSPACE 环境变量。相对路径解析后必须落在
+ * 候选目录内（防目录穿越）；绝对路径直读仅要求文件存在（个人工具，与
+ * agent 自身读文件权限对齐）。
+ */
+function fetchQuoteFromDisk(payload, sessions) {
+  const id = payload && typeof payload.id === 'string' ? payload.id : ''
+  const header = payload && typeof payload.header === 'string' ? payload.header : ''
+  const sessionId = payload && typeof payload.sessionId === 'string' ? payload.sessionId : ''
+  if (!/^[a-z0-9]+$/.test(id) || header === '') return { ok: false, error: 'invalid payload' }
+  const match = /^(\S.*?):(\d+)(?:-(\d+))?$/.exec(header)
+  if (match === null) return { ok: false, error: 'header is not a path:lines reference' }
+  const relPath = match[1]
+  const start = Number.parseInt(match[2], 10)
+  const end = match[3] !== undefined ? Number.parseInt(match[3], 10) : start
+  if (!Number.isFinite(start) || start < 1 || end < start) return { ok: false, error: 'invalid line range' }
+
+  const candidates = []
+  if (typeof sessionId === 'string' && sessionId !== '' && sessions !== undefined && sessions !== null
+    && typeof sessions.get === 'function') {
+    try {
+      const cwd = sessions.get(sessionId)?.header?.cwd
+      if (typeof cwd === 'string' && cwd !== '') candidates.push(cwd)
+    } catch { /* sessions 服务不可用时走其余候选 */ }
+  }
+  for (const cwd of recentCwds) candidates.push(cwd)
+  const envRoot = process.env.DSH_CODE_QUOTE_WORKSPACE
+  if (typeof envRoot === 'string' && envRoot !== '') candidates.push(envRoot)
+
+  const attempts = []
+  const targets = isAbsolute(relPath)
+    ? [relPath]
+    : candidates.map((cwd) => {
+      const base = cwd.replace(/[\\/]+$/, '')
+      const abs = resolvePath(base, relPath)
+      // 目录穿越守卫：解析结果必须仍在候选目录内（Windows 大小写不敏感）
+      const inside = abs.toLowerCase().startsWith(base.toLowerCase() + '\\')
+        || abs.toLowerCase().startsWith(base.toLowerCase() + '/')
+      return inside ? abs : null
+    }).filter((abs) => abs !== null)
+
+  for (const abs of targets) {
+    try {
+      const stat = statSync(abs)
+      if (!stat.isFile()) { attempts.push(abs + ' (not a file)'); continue }
+      if (stat.size > 16 * 1024 * 1024) { attempts.push(abs + ' (too large)'); continue }
+      const code = extractFileLines(readFileSync(abs, 'utf8'), start, end)
+      if (code === null) { attempts.push(abs + ' (unreadable/empty lines)'); continue }
+      const stored = putQuote({ id, header, code })
+      if (!stored.ok) return { ok: false, error: stored.error || 'store failed' }
+      return { ok: true, codeChars: code.length, path: abs }
+    } catch (error) {
+      attempts.push(abs + ' (' + (error instanceof Error ? error.message : String(error)) + ')')
+    }
+  }
+  if (attempts.length === 0 && !isAbsolute(relPath)) {
+    return { ok: false, error: 'no working directory known for this session yet (send one message first, or set DSH_CODE_QUOTE_WORKSPACE)' }
+  }
+  return { ok: false, error: 'file not resolved: ' + (attempts.join('; ') || relPath) }
+}
+
 /* ---------- 折叠阈值配置（#3）：默认内置，环境变量可覆盖，经 GET /config 下发给客户端 ---------- */
 
 const DEFAULT_MIN_INSERTED = 30
@@ -266,10 +370,42 @@ export function apply(ctx) {
           sendJson(response, 200, configPayload())
         },
       })
-      return () => { dispose(); disposeConfig() }
-    }, 'dsh-code-quote: put + config routes')
+      const disposeFetch = host.webServer.register({
+        kind: 'exact',
+        path: '/dsh-code-quote/fetch',
+        handler: async (request, response) => {
+          if (request.method !== 'POST') {
+            response.writeHead(405, { allow: 'POST' })
+            response.end()
+            return
+          }
+          if (!sameOrigin(request)) {
+            sendJson(response, 403, { ok: false, error: 'untrusted origin' })
+            return
+          }
+          try {
+            const body = await readJsonBody(request, MAX_BODY_BYTES)
+            const result = fetchQuoteFromDisk(body, ctx.sessions)
+            if (result.ok) {
+              await persistSnapshots()
+              ctx.logger?.info?.('[dsh-code-quote] fetched ' + result.codeChars + ' chars from ' + result.path)
+            } else {
+              ctx.logger?.warn?.('[dsh-code-quote] fetch failed: ' + result.error)
+            }
+            sendJson(response, 200, result)
+          } catch (error) {
+            sendJson(response, 400, {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          }
+        },
+      })
+      return () => { dispose(); disposeConfig(); disposeFetch() }
+    }, 'dsh-code-quote: put + config + fetch routes')
   })
   ctx.on('agent/pre-step', async (payload, next) => {
+    try { rememberCwd(payload?.agent?.session?.header?.cwd) } catch { /* cwd 缓存失败不影响主链路 */ }
     const decision = await next()
     if (decision === undefined || decision === null || decision.kind !== 'enter') return decision
     const messages = decision.messages

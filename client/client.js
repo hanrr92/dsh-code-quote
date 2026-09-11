@@ -380,9 +380,60 @@ window.__ModuleLoader__.load({ id: 'dsh-code-quote', factory: (require) => {
       }
       var quote = parseQuote(change.text)
       if (quote === null) {
-        console.log('[code-quote] skip: does not match quote shape (header+code)')
-        box.folding = false
-        box.prev = next
+        // 0.5.0：仅路径行插入（better-sidebar 对 >500 字符选区只写一行
+        // 「相对路径:起止行」并把代码丢弃——实测 44 行只余 114 字符路径行）。
+        // 识别该签名后让 host 按会话工作目录读磁盘文件、按行号提取并存快照。
+        var t = change.text.trim()
+        var headerOnly = null
+        if (t.length >= 20 && t.indexOf('\n') < 0 && t.indexOf('⟦') < 0
+          && (t.indexOf('/') >= 0 || t.indexOf('\\') >= 0)
+          && /^(\S.*?):(\d+)(?:-(\d+))?$/.test(t)) {
+          headerOnly = { header: t }
+        }
+        if (headerOnly === null) {
+          console.log('[code-quote] skip: does not match quote shape (header+code)')
+          box.folding = false
+          box.prev = next
+          return
+        }
+        var hid = makeId()
+        console.log('[code-quote] header-only insert: ' + headerOnly.header + ', fetching file lines, id=' + hid)
+        fetch('/dsh-code-quote/fetch', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: hid, header: headerOnly.header, sessionId: props.sessionId }),
+        }).then(function (response) {
+          return response.json()
+        }).then(function (data) {
+          if (data === null || typeof data !== 'object' || data.ok !== true) {
+            var msg = data !== null && typeof data === 'object' && data.error ? data.error : 'fetch failed'
+            console.error('[code-quote] fetch failed: ' + msg)
+            showToast('未能读取文件内容（' + msg + '）')
+            box.folding = false
+            box.prev = next
+            return
+          }
+          rememberId(hid, headerOnly.header)
+          if (chipMode && mintChip(props, change, hid, headerOnly.header, rev)) {
+            console.log('[code-quote] folded via chip ' + hid + ' (header-only fetch)')
+            box.folding = false
+            box.retries = 0
+            box.prev = next
+            return
+          }
+          var ftoken = '@⟦代码引用#' + hid + '⟧' + headerOnly.header
+          box.lastToken = ftoken
+          actions.setDraft(next.slice(0, change.start) + ftoken + next.slice(change.end))
+          console.log('[code-quote] folded via token ' + hid + ' (header-only fetch)')
+          box.folding = false
+          box.retries = 0
+          box.prev = next
+        }, function (error) {
+          console.error('[code-quote] fetch rpc failed: ' + (error && error.message ? error.message : String(error)))
+          showToast('代码引用读取失败：' + (error && error.message ? error.message : '网络错误'))
+          box.folding = false
+          box.prev = next
+        })
         return
       }
       var id = makeId()
